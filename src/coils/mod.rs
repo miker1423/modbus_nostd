@@ -81,8 +81,9 @@ impl WriteCoilModbusClient {
         buffer.push(id);
         buffer.push((address.0 >> 8) as u8);
         buffer.push(address.0 as u8);
-        buffer.push((value >> 8) as u8);
-        buffer.push(value as u8);
+        let value: u8 = if value { 0xFF } else { 0x00 };
+        buffer.push(value);
+        buffer.push(0x00u8);
         buffer
     }
 
@@ -91,10 +92,30 @@ impl WriteCoilModbusClient {
         buffer.push(id);
         buffer.push((address.0 >> 8) as u8);
         buffer.push(address.0 as u8);
-        value.iter().for_each(|v| {
-            buffer.push((v >> 8) as u8);
-            buffer.push(*v as u8);
-        });
+        let expected_quantity = (value.len() / 8) + 1;
+        let values = self.build_buffer(value);
+        buffer.extend(values);
+        if values.len() < expected_quantity {
+            buffer.push(0x00);
+        }
         buffer
+    }
+
+    fn build_buffer(self, values: &[bool]) -> Vec<u8> {
+        let mut constructed_byte = 0x00u8;
+        let mut constructed_values = Vec::new();
+        let mut counter = 0;
+        for (index, value) in values.iter().enumerate() {
+            if counter == 8 {
+                constructed_values.push(constructed_byte);
+                constructed_byte = 0x00;
+            }
+            let value = *value as u8;
+            constructed_byte |= value << (index % 8);
+            counter += 1;
+        }
+
+        constructed_values.push(constructed_byte);
+        constructed_values
     }
 }
