@@ -27,7 +27,7 @@ impl ReadCoilModbusClient {
         self
     }
 
-    pub fn send<E, EU>(self, writer: impl Write<u8, Error = E>, _reader: impl Read<u8, Error = EU>)
+    pub fn send<E, EU>(self, writer: impl Write<u8, Error = E>, _reader: &mut impl Read<u8, Error = EU>)
     -> Result<(), Infallible> {
         let quantity = self.quantity.borrow();
         let mut buffer = [0u8; 5];
@@ -59,7 +59,7 @@ impl WriteCoilModbusClient {
         self
     }
 
-    pub fn send<E, EU>(self, _writer: impl Write<u8, Error = E>, _reader: impl Read<u8, Error = EU>)
+    pub fn send<E, EU>(self, _writer: impl Write<u8, Error = E>, _reader: &mut impl Read<u8, Error = EU>)
     -> Result<(), Infallible> {
         
 
