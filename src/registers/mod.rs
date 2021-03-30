@@ -55,15 +55,6 @@ impl WriteRegisterModbusClient {
     pub fn with_values(&self, values: &[u16]) -> &Self {
         let mut vector = self.values.borrow_mut();
         vector.copy_from_slice(values);
-        /*
-        if values.len() > vector.len() {
-            if let Err(_) = vector.resize_default(values.len()) {
-                // FUCK!
-            }
-        }
-        if let Err(_) = vector.extend_from_slice(values) {
-            // FUCK!
-        }*/
         self
     }
 
