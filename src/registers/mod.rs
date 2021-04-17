@@ -1,4 +1,4 @@
-use crate::Address;
+use crate::{ Address, BUFFER, ModbusError, byte_to_error};
 use embedded_hal::serial::{Write, Read};
 use core::{convert::Infallible, cell::RefCell};
 use alloc::vec::Vec;
@@ -63,9 +63,9 @@ impl WriteRegisterModbusClient {
         let values = self.values.borrow();
         let mut buffer: Option<Vec<u8>> = None;
         if values.len() > 1 {
-            buffer = Some(self.create_package_multiple(0x10u8, self.start_address, values.as_slice()));
+            buffer = Some(self.create_package_multiple(0x10, self.start_address, values.as_slice()));
         } else if values.len() == 1 {
-            buffer = Some(self.create_package_single(0x06u8, self.start_address, *values.first().unwrap()));
+            buffer = Some(self.create_package_single(0x06, self.start_address, *values.first().unwrap()));
         } else {
             buffer = Some(Vec::from([0x00]));
         }

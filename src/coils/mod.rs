@@ -1,8 +1,8 @@
 use crate::Address;
 use embedded_hal::serial::{Write, Read};
 use core::{convert::Infallible, cell::RefCell};
-//use heapless::{Vec, consts::U8};
 use alloc::vec::Vec;
+use crate::{ ModbusError, byte_to_error, BUFFER};
 
 pub struct ReadCoilModbusClient {
     start_address: Address,
@@ -27,11 +27,11 @@ impl ReadCoilModbusClient {
         self
     }
 
-    pub fn send<E, EU>(self, writer: impl Write<u8, Error = E>, _reader: &mut impl Read<u8, Error = EU>)
-    -> Result<(), Infallible> {
+    pub fn send<E, EU>(self, writer: impl Write<u8, Error = E>, reader: &mut impl Read<u8, Error = EU>)
+    -> Result<(), ModbusError<E, EU>> {
         let quantity = self.quantity.borrow();
-        let mut buffer = [0u8; 5];
-        buffer[0] = 0x04;
+        let mut buffer = BUFFER.borrow_mut();
+        buffer[0] = 0x01;
         buffer[1] = (self.start_address.0 >> 8) as u8;
         buffer[2] = self.start_address.0 as u8;
         buffer[3] = (*quantity >> 8) as u8;
@@ -40,6 +40,28 @@ impl ReadCoilModbusClient {
         buffer.iter().map(|v| {
             nb::block!(writer.write(*v))
         });
+
+        if let Ok(value) = nb::block!(reader.read()) {
+            if buffer[0] == value + 0x80 {
+                if let Ok(error) = nb::block!(reader.read()){
+                    return Err(byte_to_error(error));
+                }
+            } else {
+                buffer[0] = value;
+            }
+        }
+
+        let byte_count = (quantity % 3) + 1;
+        let mut index = 1;
+        loop {
+            if let Ok(value) = nb::block!(reader.read()) {
+                buffer[index] = value;
+                index += 1;
+            }
+            if byte_count == index {
+                break;
+            }
+        }
 
         Ok(())
     }
@@ -59,25 +81,31 @@ impl WriteCoilModbusClient {
         self
     }
 
-    pub fn send<E, EU>(self, _writer: impl Write<u8, Error = E>, _reader: &mut impl Read<u8, Error = EU>)
-    -> Result<(), Infallible> {
-        
+    pub fn send<E, EU>(self, _writer:&mut impl Write<u8, Error = E>, _reader: &mut impl Read<u8, Error = EU>)
+    -> Result<(), ModbusError<E, EU>> {
+        let mut buffer = BUFFER.borrow_mut();
+        let values = self.values.borrow();
+        if values.len() == 1 {
+            self.create_package_single(0x05, self.start_address, *values.first().unwrap(), &mut buffer);
+        } else if values.len() > 1 {
+            self.create_package_multiple(0x0F, self.start_address, values.as_slice(), &mut buffer);
+        } else {
+
+        }
 
         Ok(())
     }
 
-    fn create_package_single(self, id: u8, address: Address, value: bool) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        buffer.push(id);
-        buffer.push((address.0 >> 8) as u8);
-        buffer.push(address.0 as u8);
+    fn create_package_single(self, id: u8, address: Address, value: bool, buffer: &mut [u8]) {
+        buffer[0] = (id);
+        buffer[1] = (address.0 >> 8) as u8;
+        buffer[2] = address.0 as u8;
         let value: u8 = if value { 0xFF } else { 0x00 };
-        buffer.push(value);
-        buffer.push(0x00u8);
-        buffer
+        buffer[3] = value;
+        buffer[4] = 0x00u8;
     }
 
-    fn create_package_multiple(self, id: u8, address: Address, value: &[bool]) -> Vec<u8> {
+    fn create_package_multiple(self, id: u8, address: Address, value: &[bool], buffer: &mut [u8]) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.push(id);
         buffer.push((address.0 >> 8) as u8);
