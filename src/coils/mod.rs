@@ -1,8 +1,9 @@
-use crate::Address;
+use crate::{Address, read_response};
 use embedded_hal::serial::{Write, Read};
-use core::{convert::Infallible, cell::RefCell};
+use core::{cell::RefCell};
 use alloc::vec::Vec;
-use crate::{ ModbusError, byte_to_error, BUFFER};
+use crate::{ byte_to_error, BUFFER, Error};
+use core::ops::DerefMut;
 
 pub struct ReadCoilModbusClient {
     start_address: Address,
@@ -27,43 +28,21 @@ impl ReadCoilModbusClient {
         self
     }
 
-    pub fn send<E, EU>(self, writer: impl Write<u8, Error = E>, reader: &mut impl Read<u8, Error = EU>)
-    -> Result<(), ModbusError<E, EU>> {
-        let quantity = self.quantity.borrow();
+    pub fn send<WE, RE>(self, writer: impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
+                        -> Result<(), Error<WE, RE>> {
+        let quantity = *self.quantity.borrow();
         let mut buffer = BUFFER.borrow_mut();
         buffer[0] = 0x01;
         buffer[1] = (self.start_address.0 >> 8) as u8;
         buffer[2] = self.start_address.0 as u8;
-        buffer[3] = (*quantity >> 8) as u8;
-        buffer[4] = *quantity as u8;
+        buffer[3] = (quantity >> 8) as u8;
+        buffer[4] = quantity as u8;
 
         buffer.iter().map(|v| {
             nb::block!(writer.write(*v))
         });
 
-        if let Ok(value) = nb::block!(reader.read()) {
-            if buffer[0] == value + 0x80 {
-                if let Ok(error) = nb::block!(reader.read()){
-                    return Err(byte_to_error(error));
-                }
-            } else {
-                buffer[0] = value;
-            }
-        }
-
-        let byte_count = (quantity % 3) + 1;
-        let mut index = 1;
-        loop {
-            if let Ok(value) = nb::block!(reader.read()) {
-                buffer[index] = value;
-                index += 1;
-            }
-            if byte_count == index {
-                break;
-            }
-        }
-
-        Ok(())
+        read_response(0x01, quantity, reader)
     }
 }
 
@@ -81,23 +60,24 @@ impl WriteCoilModbusClient {
         self
     }
 
-    pub fn send<E, EU>(self, _writer:&mut impl Write<u8, Error = E>, _reader: &mut impl Read<u8, Error = EU>)
-    -> Result<(), ModbusError<E, EU>> {
+    pub fn send<WE, RE>(self, _writer:&mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
+                        -> Result<(), Error<WE, RE>> {
         let mut buffer = BUFFER.borrow_mut();
         let values = self.values.borrow();
+        let id = if values.len() == 1 { 0x05 } else { 0x0F };
         if values.len() == 1 {
-            self.create_package_single(0x05, self.start_address, *values.first().unwrap(), &mut buffer);
+            self.create_package_single(id, self.start_address, *values.first().unwrap(), buffer.deref_mut());
         } else if values.len() > 1 {
-            self.create_package_multiple(0x0F, self.start_address, values.as_slice(), &mut buffer);
+            self.create_package_multiple(id, self.start_address, values.as_slice(), buffer.deref_mut());
         } else {
 
         }
 
-        Ok(())
+        read_response(id, values.len() as u16, reader)
     }
 
     fn create_package_single(self, id: u8, address: Address, value: bool, buffer: &mut [u8]) {
-        buffer[0] = (id);
+        buffer[0] = id;
         buffer[1] = (address.0 >> 8) as u8;
         buffer[2] = address.0 as u8;
         let value: u8 = if value { 0xFF } else { 0x00 };

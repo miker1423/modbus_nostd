@@ -22,17 +22,21 @@ impl Into<Address> for u16 {
     }
 }
 
-pub enum ModbusError<R, W> {
+pub enum Error<W, R> {
+    Modbus(ModbusError),
+    UartReadErr(R),
+    UartWriteErr(W)
+}
+
+pub enum ModbusError {
     NotSupportedFunction,
     StartAddressOrQuantityInvalid,
     AddressInvalid,
     TypeInvalid,
     Unknown,
-    ReadErr(R),
-    WriteErr(W)
 }
 
-fn byte_to_error(code: u8) -> ModbusError<(), ()> {
+fn byte_to_error(code: u8) -> ModbusError {
     match code {
         1 => ModbusError::NotSupportedFunction,
         2 => ModbusError::StartAddressOrQuantityInvalid,
@@ -60,17 +64,17 @@ impl ModbusClient {
     }
 }
 
-fn read_response<E>(id: u8, quantity: u16, reader: &mut impl Read<u8, Error = E>) -> Result<usize, ModbusError<(), E>> {
+fn read_response<E>(id: u8, quantity: u16, reader: &mut impl Read<u8, Error = E>) -> Result<(usize, &[u8]), Error<(), E>> {
     let read_value = nb::block!(reader.read());
     if let Err(err) = read_value {
-        return Err(ModbusError::ReadErr(err));
+        return Err(Error::UartReadErr(err));
     }
 
-    let read_value = read_value.unwrap();
+    let read_value = read_value.unwrap_or_default();
     if id + 0x80 == read_value {
         return match nb::block!(reader.read()) {
-            Ok(err_code) => Err(byte_to_error(err_code)),
-            Err(e) => Err(ModbusError::ReadErr(e))
+            Ok(err_code) => Err(Error::Modbus(byte_to_error(err_code))),
+            Err(e) => Err(Error::UartReadErr(e))
         }
     }
 
@@ -89,12 +93,15 @@ fn read_response<E>(id: u8, quantity: u16, reader: &mut impl Read<u8, Error = E>
     buffer[0] = read_value;
     let mut written_bytes = 1;
     for _ in 0..byte_count {
-
+        match nb::block!(reader.read()) {
+            Ok(data) => *buffer[written_bytes] = data,
+            Err(e) => return Err(Error::UartReadErr(e)),
+        }
+        written_bytes += 1;
     }
 
-
-
-    Ok(written_bytes)
+    let slice = &buffer[..written_bytes];
+    Ok((written_bytes, slice))
 }
 
 #[cfg(test)]
