@@ -1,23 +1,25 @@
 use crate::{Address, Error};
 use embedded_hal::serial::{Write, Read};
 use core::{cell::RefCell};
-use alloc::vec::Vec;
+use crate::ring_buffer::RingBuffer;
 
-pub struct ReadRegisterModbusClient {
+pub struct ReadRegisterModbusClient<'a> {
     start_address: Address,
     quantity: RefCell<u16>,
+    buffer: RingBuffer<'a, u8>,
 }
 
-pub struct WriteRegisterModbusClient {
+pub struct WriteRegisterModbusClient<'a> {
     start_address: Address,
-    values: RefCell<Vec<u16>>,
+    buffer: RingBuffer<'a, u8>,
 }
 
-impl ReadRegisterModbusClient {
-    pub fn new(start_address: Address) -> ReadRegisterModbusClient {
+impl<'a> ReadRegisterModbusClient<'a> {
+    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>) -> ReadRegisterModbusClient {
         ReadRegisterModbusClient {
             start_address,
             quantity: RefCell::default(),
+            buffer,
         }
     }
 
@@ -26,77 +28,64 @@ impl ReadRegisterModbusClient {
         self
     }
 
-    pub fn send<WE, RE>(self, writer: &mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
-                        -> Result<(), Error<WE, RE>> {
+    pub fn send<WE, RE>(&'a mut self, writer: &mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
+                        -> Result<(usize, &'a [u8]), Error<WE, RE>> {
         let quantity = *self.quantity.borrow();
-        let mut buffer = [0u8; 5];
-        buffer[0] = 0x04;
-        buffer[1] = (self.start_address.0 >> 8) as u8;
-        buffer[2] = self.start_address.0 as u8;
-        buffer[3] = (quantity >> 8) as u8;
-        buffer[4] = quantity as u8;
+        self.buffer.clear();
+        self.buffer.push_single(0x04);
+        self.buffer.push_single((self.start_address.0 >> 8) as u8);
+        self.buffer.push_single(self.start_address.0 as u8);
+        self.buffer.push_single((quantity >> 8) as u8);
+        self.buffer.push_single(quantity as u8);
 
+        let buffer = self.buffer.get_written();
         buffer.iter().map(|v| {
            nb::block!(writer.write(*v))
         });
 
-        crate::read_response(0x04, quantity, reader)
+        crate::read_response(0x04, quantity, reader, &mut self.buffer)
     }
 }
 
-impl WriteRegisterModbusClient {
-    pub fn new(start_address: Address) -> WriteRegisterModbusClient {
-        WriteRegisterModbusClient {
-            start_address,
-            values: RefCell::new(Vec::new())
-        }
+impl<'a> WriteRegisterModbusClient<'a> {
+    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>) -> WriteRegisterModbusClient {
+        WriteRegisterModbusClient { start_address, buffer }
     }
 
-    pub fn with_values(&self, values: &[u16]) -> &Self {
-        let mut vector = self.values.borrow_mut();
-        vector.copy_from_slice(values);
-        self
-    }
-
-    pub fn send<WE, RE>(self, writer: &mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
-                        -> Result<(), Error<WE, RE>> {
-        let values = self.values.borrow();
-        let mut buffer: Option<Vec<u8>> = None;
+    pub fn send<WE, RE>(&'a mut self, values: &[u16], writer: &mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
+                        -> Result<(usize, &'a [u8]), Error<WE, RE>> {
         let id = if values.len() > 1 { 0x10 } else { 0x06 };
+        self.buffer.clear();
         if values.len() > 1 {
-            buffer = Some(self.create_package_multiple(id, self.start_address, values.as_slice()));
+            self.create_package_multiple(id, values);
         } else if values.len() == 1 {
-            buffer = Some(self.create_package_single(id, self.start_address, *values.first().unwrap()));
+            self.create_package_single(id, *values.first().unwrap());
         } else {
-            buffer = Some(Vec::from([0x00]));
         }
 
-        buffer.unwrap().iter().for_each(|v| {
+        let buffer = self.buffer.get_written();
+        buffer.iter().for_each(|v| {
             nb::block!(writer.write(*v));
         });
 
-        crate::read_response(id, values.len() as u16, reader)
+        crate::read_response(id, values.len() as u16, reader, &mut self.buffer)
     }
 
-    fn create_package_single(self, id: u8, address: Address, value: u16) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        buffer.push(id);
-        buffer.push((address.0 >> 8) as u8);
-        buffer.push(address.0 as u8);
-        buffer.push((value >> 8) as u8);
-        buffer.push(value as u8);
-        buffer
+    fn create_package_single(&mut self, id: u8, value: u16) {
+        self.buffer.push_single(id);
+        self.buffer.push_single((self.start_address.0 >> 8) as u8);
+        self.buffer.push_single(self.start_address.0 as u8);
+        self.buffer.push_single((value >> 8) as u8);
+        self.buffer.push_single(value as u8);
     }
 
-    fn create_package_multiple(self, id: u8, address: Address, value: &[u16]) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        buffer.push(id);
-        buffer.push((address.0 >> 8) as u8);
-        buffer.push(address.0 as u8);
-        value.iter().for_each(|v| {
-            buffer.push((v >> 8) as u8);
-            buffer.push(*v as u8);
-        });
-        buffer
+    fn create_package_multiple(&mut self, id: u8, values: &[u16]) {
+        self.buffer.push_single(id);
+        self.buffer.push_single((self.start_address.0 >> 8) as u8);
+        self.buffer.push_single(self.start_address.0 as u8);
+        for value in values.iter() {
+            self.buffer.push_single((value >> 8) as u8);
+            self.buffer.push_single(*value as u8);
+        }
     }
 }

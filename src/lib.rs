@@ -1,18 +1,16 @@
 #![no_std]
-#![feature(alloc)]
-
-extern crate alloc;
 
 use core::convert::Into;
-use core::cell::RefCell;
 use embedded_hal::serial::Read;
+use crate::ring_buffer::RingBuffer;
 
 pub mod coils;
 pub mod registers;
+mod ring_buffer;
 
-static BUFFER: RefCell<[u8; 253]> = RefCell::new([0; 253]);
-
-pub struct ModbusClient;
+pub struct ModbusClient<'a> {
+    buffer: RingBuffer<'a, u8>
+}
 
 pub struct Address(pub u16);
 
@@ -46,25 +44,32 @@ fn byte_to_error(code: u8) -> ModbusError {
     }
 }
 
-impl ModbusClient {
-    pub fn write_registers_from(self, start_address: Address) -> registers::WriteRegisterModbusClient {
-        registers::WriteRegisterModbusClient::new(start_address)
+impl<'a> ModbusClient<'a> {
+    pub fn new(buffer: &'a mut [u8; 253]) -> ModbusClient<'a> {
+        ModbusClient {
+            buffer: RingBuffer::new(buffer)
+        }
     }
 
-    pub fn read_register_from(self, start_address: Address) -> registers::ReadRegisterModbusClient {
-        registers::ReadRegisterModbusClient::new(start_address)
+    pub fn write_registers_from(self, start_address: Address) -> registers::WriteRegisterModbusClient<'a> {
+        registers::WriteRegisterModbusClient::new(start_address, self.buffer)
     }
 
-    pub fn write_coil_from(self, start_address: Address) -> coils::WriteCoilModbusClient {
-        coils::WriteCoilModbusClient::new(start_address)
+    pub fn read_register_from(self, start_address: Address) -> registers::ReadRegisterModbusClient<'a> {
+        registers::ReadRegisterModbusClient::new(start_address, self.buffer)
     }
 
-    pub fn read_coil_from(self, start_address: Address) -> coils::ReadCoilModbusClient {
-        coils::ReadCoilModbusClient::new(start_address)
+    pub fn write_coil_from(self, start_address: Address) -> coils::WriteCoilModbusClient<'a> {
+        coils::WriteCoilModbusClient::new(start_address, self.buffer)
+    }
+
+    pub fn read_coil_from(self, start_address: Address) -> coils::ReadCoilModbusClient<'a> {
+        coils::ReadCoilModbusClient::new(start_address, self.buffer)
     }
 }
 
-fn read_response<E>(id: u8, quantity: u16, reader: &mut impl Read<u8, Error = E>) -> Result<(usize, &[u8]), Error<(), E>> {
+fn read_response<'a, W, R>(id: u8, quantity: u16, reader: &mut impl Read<u8, Error = R>, buffer: &'a mut RingBuffer<'a, u8>)
+    -> Result<(usize, &'a [u8]), Error<W, R>> {
     let read_value = nb::block!(reader.read());
     if let Err(err) = read_value {
         return Err(Error::UartReadErr(err));
@@ -89,25 +94,15 @@ fn read_response<E>(id: u8, quantity: u16, reader: &mut impl Read<u8, Error = E>
             _ => 0x00
         };
 
-    let buffer = BUFFER.borrow_mut();
-    buffer[0] = read_value;
-    let mut written_bytes = 1;
+    buffer.clear();
+    buffer.push_single(read_value);
     for _ in 0..byte_count {
         match nb::block!(reader.read()) {
-            Ok(data) => *buffer[written_bytes] = data,
+            Ok(data) => buffer.push_single(data),
             Err(e) => return Err(Error::UartReadErr(e)),
-        }
-        written_bytes += 1;
+        };
     }
 
-    let slice = &buffer[..written_bytes];
-    Ok((written_bytes, slice))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let coil_read = ModbusClient::new().read_coil_from(0x15.into()).with_quantity(0x78);
-    }
+    let slice = buffer.get_written();
+    Ok((buffer.len(), slice))
 }

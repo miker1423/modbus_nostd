@@ -1,25 +1,26 @@
 use crate::{Address, read_response};
 use embedded_hal::serial::{Write, Read};
 use core::{cell::RefCell};
-use alloc::vec::Vec;
-use crate::{ byte_to_error, BUFFER, Error};
-use core::ops::DerefMut;
+use crate::Error;
+use crate::ring_buffer::RingBuffer;
 
-pub struct ReadCoilModbusClient {
+pub struct ReadCoilModbusClient<'a> {
     start_address: Address,
     quantity: RefCell<u16>,
+    buffer: RingBuffer<'a, u8>,
 }
 
-pub struct WriteCoilModbusClient {
+pub struct WriteCoilModbusClient<'a> {
     start_address: Address,
-    values: RefCell<Vec<bool>>,
+    buffer: RingBuffer<'a, u8>,
 }
 
-impl ReadCoilModbusClient {
-    pub fn new(start_address: Address) -> ReadCoilModbusClient {
+impl<'a> ReadCoilModbusClient<'a> {
+    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>) -> ReadCoilModbusClient {
         ReadCoilModbusClient {
             start_address,
             quantity: RefCell::default(),
+            buffer
         }
     }
 
@@ -28,92 +29,82 @@ impl ReadCoilModbusClient {
         self
     }
 
-    pub fn send<WE, RE>(self, writer: impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
-                        -> Result<(), Error<WE, RE>> {
+    pub fn send<WE, RE>(&'a mut self, writer: &mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
+                        -> Result<(usize, &'a [u8]), Error<WE, RE>> {
         let quantity = *self.quantity.borrow();
-        let mut buffer = BUFFER.borrow_mut();
-        buffer[0] = 0x01;
-        buffer[1] = (self.start_address.0 >> 8) as u8;
-        buffer[2] = self.start_address.0 as u8;
-        buffer[3] = (quantity >> 8) as u8;
-        buffer[4] = quantity as u8;
+        self.buffer.clear();
+        self.buffer.push_single(0x01);
+        self.buffer.push_single((self.start_address.0 >> 8) as u8);
+        self.buffer.push_single(self.start_address.0 as u8);
+        self.buffer.push_single((quantity >> 8) as u8);
+        self.buffer.push_single(quantity as u8);
 
-        buffer.iter().map(|v| {
+        self.buffer.get_written().iter().map(|v| {
             nb::block!(writer.write(*v))
         });
 
-        read_response(0x01, quantity, reader)
+        read_response(0x01, quantity, reader, &mut self.buffer)
     }
 }
 
-impl WriteCoilModbusClient {
-    pub fn new(start_address: Address) -> WriteCoilModbusClient {
-        WriteCoilModbusClient {
-            start_address,
-            values: RefCell::new(Vec::new()),
-        }
+impl<'a> WriteCoilModbusClient<'a> {
+    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>,)
+        -> WriteCoilModbusClient {
+        WriteCoilModbusClient { start_address, buffer }
     }
 
-    pub fn with_coil(&self, values: &[bool]) -> &Self {
-        let mut vector = self.values.borrow_mut();
-        vector.copy_from_slice(values);
-        self
-    }
-
-    pub fn send<WE, RE>(self, _writer:&mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
-                        -> Result<(), Error<WE, RE>> {
-        let mut buffer = BUFFER.borrow_mut();
-        let values = self.values.borrow();
+    pub fn send<WE, RE>(&'a mut self, values: &[bool], _writer:&mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
+                        -> Result<(usize, &'a [u8]), Error<WE, RE>> {
+        self.buffer.clear();
         let id = if values.len() == 1 { 0x05 } else { 0x0F };
         if values.len() == 1 {
-            self.create_package_single(id, self.start_address, *values.first().unwrap(), buffer.deref_mut());
+            self.create_package_single(id, *values.first().unwrap());
         } else if values.len() > 1 {
-            self.create_package_multiple(id, self.start_address, values.as_slice(), buffer.deref_mut());
+            self.create_package_multiple(id, values);
         } else {
 
         }
 
-        read_response(id, values.len() as u16, reader)
+        read_response(id, values.len() as u16, reader, &mut self.buffer)
     }
 
-    fn create_package_single(self, id: u8, address: Address, value: bool, buffer: &mut [u8]) {
-        buffer[0] = id;
-        buffer[1] = (address.0 >> 8) as u8;
-        buffer[2] = address.0 as u8;
+    fn create_package_single(&mut self, id: u8, value: bool) {
+        self.buffer.push_single(id);
+        self.buffer.push_single((self.start_address.0 >> 8) as u8);
+        self.buffer.push_single(self.start_address.0 as u8);
         let value: u8 = if value { 0xFF } else { 0x00 };
-        buffer[3] = value;
-        buffer[4] = 0x00u8;
+        self.buffer.push_single(value);
+        self.buffer.push_single(0x00u8);
     }
 
-    fn create_package_multiple(self, id: u8, address: Address, value: &[bool], buffer: &mut [u8]) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        buffer.push(id);
-        buffer.push((address.0 >> 8) as u8);
-        buffer.push(address.0 as u8);
+    fn create_package_multiple(&mut self, id: u8, value: &[bool]) -> usize {
+        self.buffer.push_single(id);
+        self.buffer.push_single((self.start_address.0 >> 8) as u8);
+        self.buffer.push_single(self.start_address.0 as u8);
         let expected_quantity = (value.len() / 8) + 1;
-        let values = self.build_buffer(value);
-        buffer.extend(values);
-        if values.len() < expected_quantity {
-            buffer.push(0x00);
+        let written_bytes = self.build_buffer(value);
+        if written_bytes < expected_quantity {
+            self.buffer.push_single(0x00);
+            return written_bytes + 1;
         }
-        buffer
+        written_bytes
     }
 
-    fn build_buffer(self, values: &[bool]) -> Vec<u8> {
+    fn build_buffer(&mut self, values: &[bool]) -> usize {
         let mut constructed_byte = 0x00u8;
-        let mut constructed_values = Vec::new();
-        let mut counter = 0;
+        let mut written_bytes = 0;
         for (index, value) in values.iter().enumerate() {
-            if counter == 8 {
-                constructed_values.push(constructed_byte);
+            if index != 0 && (index % 8) == 0 {
+                self.buffer.push_single(constructed_byte);
+                written_bytes += 1;
                 constructed_byte = 0x00;
             }
             let value = *value as u8;
             constructed_byte |= value << (index % 8);
-            counter += 1;
         }
 
-        constructed_values.push(constructed_byte);
-        constructed_values
+        self.buffer.push_single(constructed_byte);
+        written_bytes += 1;
+        written_bytes
     }
 }
