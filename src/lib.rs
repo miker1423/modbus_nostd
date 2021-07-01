@@ -3,13 +3,23 @@
 use core::convert::Into;
 use embedded_hal::serial::Read;
 use crate::ring_buffer::RingBuffer;
+use crc16::{State, MODBUS};
 
 pub mod coils;
 pub mod registers;
 mod ring_buffer;
 
 pub struct ModbusClient<'a> {
-    buffer: RingBuffer<'a, u8>
+    server_address: ServerAddress,
+    buffer: RingBuffer<'a, u8>,
+}
+
+#[derive(Copy, Clone)]
+pub struct ServerAddress(pub u8);
+impl Into<ServerAddress> for u8 {
+    fn into(self) -> ServerAddress {
+        ServerAddress(self)
+    }
 }
 
 pub struct Address(pub u16);
@@ -45,31 +55,38 @@ fn byte_to_error(code: u8) -> ModbusError {
 }
 
 impl<'a> ModbusClient<'a> {
-    pub fn new(buffer: &'a mut [u8; 253]) -> ModbusClient<'a> {
+    pub fn new(buffer: &'a mut [u8; 256], server_address: ServerAddress) -> ModbusClient<'a> {
         ModbusClient {
-            buffer: RingBuffer::new(buffer)
+            server_address,
+            buffer: RingBuffer::new(buffer),
         }
     }
 
     pub fn write_registers_from(self, start_address: Address) -> registers::WriteRegisterModbusClient<'a> {
-        registers::WriteRegisterModbusClient::new(start_address, self.buffer)
+        registers::WriteRegisterModbusClient::new(self.server_address, start_address, self.buffer)
     }
 
     pub fn read_register_from(self, start_address: Address) -> registers::ReadRegisterModbusClient<'a> {
-        registers::ReadRegisterModbusClient::new(start_address, self.buffer)
+        registers::ReadRegisterModbusClient::new(self.server_address, start_address, self.buffer)
     }
 
     pub fn write_coil_from(self, start_address: Address) -> coils::WriteCoilModbusClient<'a> {
-        coils::WriteCoilModbusClient::new(start_address, self.buffer)
+        coils::WriteCoilModbusClient::new(self.server_address, start_address, self.buffer)
     }
 
     pub fn read_coil_from(self, start_address: Address) -> coils::ReadCoilModbusClient<'a> {
-        coils::ReadCoilModbusClient::new(start_address, self.buffer)
+        coils::ReadCoilModbusClient::new(self.server_address, start_address, self.buffer)
     }
 }
 
 fn read_response<'a, W, R>(id: u8, quantity: u16, reader: &mut impl Read<u8, Error = R>, buffer: &'a mut RingBuffer<'a, u8>)
     -> Result<(usize, &'a [u8]), Error<W, R>> {
+    let received_id = nb::block!(reader.read());
+    if let Err(err) = received_id {
+        return Err(Error::UartReadErr(err));
+    }
+    let received_id = received_id.unwrap_or_default();
+
     let read_value = nb::block!(reader.read());
     if let Err(err) = read_value {
         return Err(Error::UartReadErr(err));
@@ -83,19 +100,28 @@ fn read_response<'a, W, R>(id: u8, quantity: u16, reader: &mut impl Read<u8, Err
         }
     }
 
+    let size = nb::block!(reader.read());
+    if let Err(err) = size {
+        return Err(Error::UartReadErr(err));
+    }
+    let size = size.unwrap_or_default();
+
     let byte_count =
         match id {
             0x05 | 0x06 | 0x0F | 0x10 => 4,
             0x04 => 2 * quantity,
             0x01 => match quantity % 8 {
-                0 => (quantity / 8) + 1,
-                _ => (quantity / 8)
+                0 => (quantity / 8),
+                _ => (quantity / 8) + 1
             }
             _ => 0x00
         };
 
+    let byte_count = byte_count + 2;
     buffer.clear();
+    buffer.push_single(received_id);
     buffer.push_single(read_value);
+    buffer.push_single(size);
     for _ in 0..byte_count {
         match nb::block!(reader.read()) {
             Ok(data) => buffer.push_single(data),
@@ -105,4 +131,9 @@ fn read_response<'a, W, R>(id: u8, quantity: u16, reader: &mut impl Read<u8, Err
 
     let slice = buffer.get_written();
     Ok((buffer.len(), slice))
+}
+
+fn add_crc<'a>(buffer: &'a RingBuffer<'a, u8>) -> u16{
+    let written_buffer = buffer.get_written();
+    State::<MODBUS>::calculate(written_buffer)
 }

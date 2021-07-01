@@ -1,22 +1,25 @@
-use crate::{Address, Error};
+use crate::{Address, Error, ServerAddress};
 use embedded_hal::serial::{Write, Read};
 use core::{cell::RefCell};
 use crate::ring_buffer::RingBuffer;
 
 pub struct ReadRegisterModbusClient<'a> {
+    server_address: ServerAddress,
     start_address: Address,
     quantity: RefCell<u16>,
     buffer: RingBuffer<'a, u8>,
 }
 
 pub struct WriteRegisterModbusClient<'a> {
+    server_address: ServerAddress,
     start_address: Address,
     buffer: RingBuffer<'a, u8>,
 }
 
 impl<'a> ReadRegisterModbusClient<'a> {
-    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>) -> ReadRegisterModbusClient {
+    pub fn new(server_address: ServerAddress, start_address: Address, buffer: RingBuffer<'a, u8>) -> ReadRegisterModbusClient {
         ReadRegisterModbusClient {
+            server_address,
             start_address,
             quantity: RefCell::default(),
             buffer,
@@ -32,11 +35,16 @@ impl<'a> ReadRegisterModbusClient<'a> {
                         -> Result<(usize, &'a [u8]), Error<WE, RE>> {
         let quantity = *self.quantity.borrow();
         self.buffer.clear();
+        self.buffer.push_single(self.server_address.0);
         self.buffer.push_single(0x04);
         self.buffer.push_single((self.start_address.0 >> 8) as u8);
         self.buffer.push_single(self.start_address.0 as u8);
         self.buffer.push_single((quantity >> 8) as u8);
         self.buffer.push_single(quantity as u8);
+
+        let crc = crate::add_crc(&self.buffer);
+        self.buffer.push_single(crc as u8);
+        self.buffer.push_single((crc >> 8) as u8);
 
         let buffer = self.buffer.get_written();
         buffer.iter().map(|v| {
@@ -48,20 +56,28 @@ impl<'a> ReadRegisterModbusClient<'a> {
 }
 
 impl<'a> WriteRegisterModbusClient<'a> {
-    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>) -> WriteRegisterModbusClient {
-        WriteRegisterModbusClient { start_address, buffer }
+    pub fn new(server_address: ServerAddress, start_address: Address, buffer: RingBuffer<'a, u8>) -> WriteRegisterModbusClient {
+        WriteRegisterModbusClient {
+            server_address,
+            start_address,
+            buffer
+        }
     }
 
     pub fn send<WE, RE>(&'a mut self, values: &[u16], writer: &mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
                         -> Result<(usize, &'a [u8]), Error<WE, RE>> {
         let id = if values.len() > 1 { 0x10 } else { 0x06 };
         self.buffer.clear();
+        self.buffer.push_single(self.server_address.0);
         if values.len() > 1 {
             self.create_package_multiple(id, values);
         } else if values.len() == 1 {
             self.create_package_single(id, *values.first().unwrap());
         } else {
         }
+        let crc = crate::add_crc(&self.buffer);
+        self.buffer.push_single(crc as u8);
+        self.buffer.push_single((crc >> 8) as u8);
 
         let buffer = self.buffer.get_written();
         buffer.iter().for_each(|v| {

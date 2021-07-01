@@ -1,30 +1,33 @@
-use crate::{Address, read_response};
+use crate::{Address, read_response, add_crc, ServerAddress};
 use embedded_hal::serial::{Write, Read};
 use core::{cell::RefCell};
 use crate::Error;
 use crate::ring_buffer::RingBuffer;
 
 pub struct ReadCoilModbusClient<'a> {
+    server_address: ServerAddress,
     start_address: Address,
     quantity: RefCell<u16>,
     buffer: RingBuffer<'a, u8>,
 }
 
 pub struct WriteCoilModbusClient<'a> {
+    server_address: ServerAddress,
     start_address: Address,
     buffer: RingBuffer<'a, u8>,
 }
 
 impl<'a> ReadCoilModbusClient<'a> {
-    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>) -> ReadCoilModbusClient {
+    pub fn new(server_address: ServerAddress, start_address: Address, buffer: RingBuffer<'a, u8>) -> ReadCoilModbusClient {
         ReadCoilModbusClient {
+            server_address,
             start_address,
             quantity: RefCell::default(),
             buffer
         }
     }
 
-    pub fn with_quantity(&self, quantity: u16) -> &Self {
+    pub fn with_quantity(self, quantity: u16) -> Self {
         self.quantity.replace(quantity);
         self
     }
@@ -33,30 +36,44 @@ impl<'a> ReadCoilModbusClient<'a> {
                         -> Result<(usize, &'a [u8]), Error<WE, RE>> {
         let quantity = *self.quantity.borrow();
         self.buffer.clear();
+        self.buffer.push_single(self.server_address.0);
         self.buffer.push_single(0x01);
         self.buffer.push_single((self.start_address.0 >> 8) as u8);
         self.buffer.push_single(self.start_address.0 as u8);
         self.buffer.push_single((quantity >> 8) as u8);
         self.buffer.push_single(quantity as u8);
 
-        self.buffer.get_written().iter().map(|v| {
-            nb::block!(writer.write(*v))
-        });
+        let crc = add_crc(&self.buffer);
+        self.buffer.push_single(crc as u8);
+        self.buffer.push_single((crc >> 8) as u8);
+
+        let buffer = self.buffer.get_written();
+        for v in buffer.iter() {
+            let result = nb::block!(writer.write(*v));
+            if let Ok(()) = result {
+
+            }
+        }
 
         read_response(0x01, quantity, reader, &mut self.buffer)
     }
 }
 
 impl<'a> WriteCoilModbusClient<'a> {
-    pub fn new(start_address: Address, buffer: RingBuffer<'a, u8>,)
+    pub fn new(server_address: ServerAddress, start_address: Address, buffer: RingBuffer<'a, u8>,)
         -> WriteCoilModbusClient {
-        WriteCoilModbusClient { start_address, buffer }
+        WriteCoilModbusClient {
+            server_address,
+            start_address,
+            buffer
+        }
     }
 
     pub fn send<WE, RE>(&'a mut self, values: &[bool], _writer:&mut impl Write<u8, Error =WE>, reader: &mut impl Read<u8, Error =RE>)
                         -> Result<(usize, &'a [u8]), Error<WE, RE>> {
         self.buffer.clear();
         let id = if values.len() == 1 { 0x05 } else { 0x0F };
+        self.buffer.push_single(self.server_address.0);
         if values.len() == 1 {
             self.create_package_single(id, *values.first().unwrap());
         } else if values.len() > 1 {
@@ -64,6 +81,9 @@ impl<'a> WriteCoilModbusClient<'a> {
         } else {
 
         }
+        let crc = add_crc(&self.buffer);
+        self.buffer.push_single(crc as u8);
+        self.buffer.push_single((crc >> 8) as u8);
 
         read_response(id, values.len() as u16, reader, &mut self.buffer)
     }

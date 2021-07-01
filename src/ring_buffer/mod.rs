@@ -14,7 +14,7 @@ pub struct RingBuffer<'a, T: 'a> {
 
 
 impl<'a> RingBuffer<'a, u8> {
-    pub fn new(buffer:&'a mut [u8; 253]) -> RingBuffer<'a, u8>
+    pub fn new(buffer:&'a mut [u8; 256]) -> RingBuffer<'a, u8>
     {
         RingBuffer {
             storage: ManagedSlice::Borrowed(buffer),
@@ -69,6 +69,7 @@ impl<'a> RingBuffer<'a, u8> {
         if self.is_full() { return Err(Error::Exhausted) }
         let index = self.get_idx_unchecked(self.length);
         self.storage[index] = value;
+        self.length += 1;
         Ok(())
     }
 
