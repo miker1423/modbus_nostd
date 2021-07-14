@@ -1,3 +1,4 @@
+// Inspired by https://github.com/smoltcp-rs/smoltcp/blob/master/src/storage/ring_buffer.rs
 use core::cmp;
 use managed::ManagedSlice;
 
