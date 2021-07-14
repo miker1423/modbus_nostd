@@ -26,7 +26,7 @@ impl<'a> ReadRegisterModbusClient<'a> {
         }
     }
 
-    pub fn with_quantity(&self, quantity: u16) -> &Self {
+    pub fn with_quantity(self, quantity: u16) -> Self {
         self.quantity.replace(quantity);
         self
     }
@@ -47,9 +47,10 @@ impl<'a> ReadRegisterModbusClient<'a> {
         self.buffer.push_single((crc >> 8) as u8);
 
         let buffer = self.buffer.get_written();
-        buffer.iter().map(|v| {
-           nb::block!(writer.write(*v))
-        });
+        for v in buffer.iter() {
+            let result = nb::block!(writer.write(*v));
+            if let Ok(()) = result {}
+        }
 
         crate::read_response(0x04, quantity, reader, &mut self.buffer)
     }
